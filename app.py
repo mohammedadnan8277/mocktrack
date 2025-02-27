@@ -1,9 +1,8 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
 from datetime import datetime
+import time  # Import time for the progress bar
 
 # Admin credentials
 ADMIN_USERNAME = "admin"
@@ -13,11 +12,29 @@ ADMIN_PASSWORD = "adnan@8277"
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 
-# Connect to SQLite database
+# Database Connection
 conn = sqlite3.connect("evaluations.db", check_same_thread=False)
 c = conn.cursor()
 
-# Create table if not exists
+# Drop and recreate the evaluations table to ensure the correct schema
+#c.execute("DROP TABLE IF EXISTS evaluations")
+#conn.commit()
+
+# Create tables if they do not exist
+c.execute('''
+    CREATE TABLE IF NOT EXISTS students (
+        student_roll_no TEXT PRIMARY KEY,
+        student_name TEXT,
+        specialization TEXT
+    )
+''')
+
+c.execute('''
+    CREATE TABLE IF NOT EXISTS trainers (
+        trainer_name TEXT PRIMARY KEY
+    )
+''')
+
 c.execute('''
     CREATE TABLE IF NOT EXISTS evaluations (
         trainer_name TEXT,
@@ -42,12 +59,12 @@ c.execute('''
 ''')
 conn.commit()
 
-# Admin Login
+# Admin Login Function
 def admin_login():
     st.title("🔑 Admin Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-    
+
     if st.button("Login", use_container_width=True):
         if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
             st.session_state.logged_in = True
@@ -59,212 +76,233 @@ def admin_login():
 # Admin Dashboard
 def admin_dashboard():
     st.title("Admin Dashboard")
-    evaluations = c.execute("SELECT * FROM evaluations").fetchall()
 
-    if evaluations:
-        df = pd.DataFrame(evaluations, columns=["Trainer Name", "Student Name", "Student Roll No", "Specialization", "Job Knowledge", "Personality", "Domain Knowledge", "Interpersonal Skills", "Attitude", "Confidence", "Communication", "Business Acumen", "Analytical Thinking", "Leadership", "Feedback", "Total Marks", "Submitted By", "Timestamp"])
-        
-        st.subheader("📋 Evaluation Summary")
-        st.dataframe(df)
+    if not st.session_state.logged_in:
+        st.error("⛔ Access Denied. Please log in as an admin.")
+        return
 
-        total_students = 120  # Set actual total students count here
-        completed_count = len(df)
-        pending_count = max(total_students - completed_count, 0)
+    # Upload Student List
+    st.subheader("📄 Upload Student List")
+    uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+    
+    if uploaded_file:
+        try:
+            df = pd.read_csv(uploaded_file)
+            required_columns = {"student_roll_no", "student_name", "specialization"}
+            if required_columns.issubset(df.columns):
+                c.execute("DELETE FROM students")  # Clear previous student data
+                conn.commit()
+                df.to_sql("students", conn, if_exists="append", index=False)
+                st.success("✅ Students uploaded successfully!")
 
-        col1, col2 = st.columns(2)
-        col1.metric("✅ Completed Evaluations", completed_count)
-        col2.metric("⏳ Pending Evaluations", pending_count)
+                # Display Preview of Uploaded Data
+                st.subheader("👀 Student List Preview")
+                st.dataframe(df)
 
-        
-        
-        st.subheader("📥 Download Report")
-        csv = df.to_csv(index=False).encode('utf-8')
-        st.download_button(label="⬇️ Download CSV", data=csv, file_name="evaluation_report.csv", mime='text/csv', use_container_width=True)
-        
-        if st.button("Logout", use_container_width=True):
-            st.session_state.logged_in = False
+                # Download Student List
+                csv_data = df.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="⬇️ Download Uploaded Student List",
+                    data=csv_data,
+                    file_name="uploaded_student_list.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+            else:
+                st.error(f"❌ CSV must contain columns: {', '.join(required_columns)}.")
+        except Exception as e:
+            st.error(f"⚠️ Error reading CSV: {e}")
+
+    # Add Trainer
+    st.subheader("👨‍🏫 Add Trainer")
+    new_trainer = st.text_input("Enter Trainer Name")
+    if st.button("Add Trainer", use_container_width=True):
+        if new_trainer:
+            try:
+                c.execute("INSERT INTO trainers (trainer_name) VALUES (?)", (new_trainer,))
+                conn.commit()
+                st.success(f"✅ Trainer '{new_trainer}' added successfully!")
+                st.rerun()
+            except sqlite3.IntegrityError:
+                st.error(f"❌ Trainer '{new_trainer}' already exists.")
+        else:
+            st.error("❌ Please enter a trainer name.")
+
+    # Delete Trainer
+    st.subheader("🗑️ Delete Trainer")
+    trainers_df = pd.read_sql("SELECT * FROM trainers", conn)
+    if not trainers_df.empty:
+        selected_trainers = st.multiselect("Select trainers to delete", trainers_df["trainer_name"], key="delete_trainers")
+        if selected_trainers and st.button("Delete Selected Trainers", use_container_width=True):
+            c.executemany("DELETE FROM trainers WHERE trainer_name = ?", [(trainer,) for trainer in selected_trainers])
+            conn.commit()
+            st.success(f"✅ Deleted {len(selected_trainers)} trainers successfully!")
             st.rerun()
+    else:
+        st.info("ℹ️ No trainers found in the database.")
+
+    # Fetch students and evaluations
+    students_df = pd.read_sql("SELECT * FROM students", conn)
+    evaluations_df = pd.read_sql("SELECT student_roll_no FROM evaluations", conn)
+
+    if not students_df.empty:
+        # Add Evaluation Status
+        students_df["Evaluation Status"] = students_df["student_roll_no"].apply(
+            lambda roll_no: "✅ Evaluated" if roll_no in evaluations_df["student_roll_no"].values else "⏳ Not Evaluated"
+        )
+
+        # Display Student List with Status
+        st.subheader("📋 Student Evaluation Status")
+        st.dataframe(students_df)
+        
+        # Multi-select delete with Select All option
+        selected_students = st.multiselect("Select students to delete", students_df["student_roll_no"], key="delete_students")
+        select_all = st.checkbox("Select All")
+        
+        if select_all:
+            selected_students = students_df["student_roll_no"].tolist()
+
+        if selected_students and st.button("🗑️ Delete Selected", use_container_width=True):
+            c.executemany("DELETE FROM students WHERE student_roll_no = ?", [(roll_no,) for roll_no in selected_students])
+            conn.commit()
+            st.success(f"✅ Deleted {len(selected_students)} students successfully!")
+            st.rerun()
+
+        # Count Metrics
+        total_students = len(students_df)
+        completed_evaluations = len(evaluations_df)
+        pending_evaluations = total_students - completed_evaluations
+
+        # Display Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("👥 Total Students", total_students)
+        col2.metric("✅ Evaluated", completed_evaluations)
+        col3.metric("⏳ Pending", pending_evaluations)
+
+    # Fetch and Display Evaluations
+    evaluations = pd.read_sql("SELECT * FROM evaluations", conn)
+    
+    if not evaluations.empty:
+        st.subheader("📊 Evaluation Summary")
+        
+        # Add date filter
+        st.subheader("📅 Filter Evaluations by Date Range")
+        col1, col2 = st.columns(2)
+        with col1:
+            from_date = st.date_input("From Date", value=pd.to_datetime(evaluations['timestamp']).min())
+        with col2:
+            to_date = st.date_input("To Date", value=pd.to_datetime(evaluations['timestamp']).max())
+        
+        # Filter evaluations based on date range
+        evaluations['timestamp'] = pd.to_datetime(evaluations['timestamp'])
+        filtered_evaluations = evaluations[(evaluations['timestamp'] >= pd.to_datetime(from_date)) & (evaluations['timestamp'] <= pd.to_datetime(to_date))]
+        
+        st.dataframe(filtered_evaluations)
+
+        # Download Filtered Evaluation Report
+        csv_eval = filtered_evaluations.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Download Evaluation Report",
+            data=csv_eval,
+            file_name="evaluation_report.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
     else:
         st.info("ℹ️ No evaluations found in the database.")
 
+    # Always Show Logout Button
+    st.markdown("---")
+    if st.button("🚪 Logout", use_container_width=True):
+        st.session_state.logged_in = False
+        st.rerun()
+        
 # Trainer Evaluation Form
 def trainer_form():
     st.title("MockTrack: Digital Interview Evaluation System")
     st.write("Streamline Mock Interviews with Seamless Digital Record-Keeping and Evaluation")
 
-    students = {
-        "2021ECE0101": {"name": "Bob Jones", "specialization": "ECE"},
-        "2021CSE0102": {"name": "Frank Johnson", "specialization": "CSE"},
-        "2021IT0103": {"name": "Jane Garcia", "specialization": "IT"},
-        "2021CSBS0104": {"name": "Charlie Smith", "specialization": "CSBS"},
-        "2021ECE0105": {"name": "Grace Smith", "specialization": "ECE"},
-        "2021CSE0106": {"name": "Emma Harris", "specialization": "CSE"},
-        "2021AI&DS0107": {"name": "Frank Miller", "specialization": "AI&DS"},
-        "2021CSE0108": {"name": "Charlie Jones", "specialization": "CSE"},
-        "2021CSE0109": {"name": "Bob Miller", "specialization": "CSE"},
-        "2021CSE0110": {"name": "Emma Davis", "specialization": "CSE"},
-        "2021CSBS0111": {"name": "Alice Brown", "specialization": "CSBS"},
-        "2021CSBS0112": {"name": "Grace Davis", "specialization": "CSBS"},
-        "2021CSE0113": {"name": "Jane Jones", "specialization": "CSE"},
-        "2021AI&DS0114": {"name": "Grace Garcia", "specialization": "AI&DS"},
-        "2021EEE0115": {"name": "Frank Harris", "specialization": "EEE"},
-        "2021CSE0116": {"name": "Emma Miller", "specialization": "CSE"},
-        "2021CSE0117": {"name": "Henry Harris", "specialization": "CSE"},
-        "2021CSE0118": {"name": "David Brown", "specialization": "CSE"},
-        "2021CSBS0119": {"name": "Emma Johnson", "specialization": "CSBS"},
-        "2021ECE0120": {"name": "David Martinez", "specialization": "ECE"},
-        "2021ECE0121": {"name": "Henry Brown", "specialization": "ECE"},
-        "2021EEE0122": {"name": "Bob Johnson", "specialization": "EEE"},
-        "2021CSE0123": {"name": "Frank Brown", "specialization": "CSE"},
-        "2021CSBS0124": {"name": "Charlie Martinez", "specialization": "CSBS"},
-        "2021CSE0125": {"name": "Jane Johnson", "specialization": "CSE"},
-        "2021CSE0126": {"name": "Grace Harris", "specialization": "CSE"},
-        "2021CSE0127": {"name": "Emma Williams", "specialization": "CSE"},
-        "2021ECE0128": {"name": "Bob Williams", "specialization": "ECE"},
-        "2021CSE0129": {"name": "Alice Smith", "specialization": "CSE"},
-        "2021CSE0130": {"name": "Frank Jones", "specialization": "CSE"},
-        "2021CSBS0131": {"name": "Emma Jones", "specialization": "CSBS"},
-        "2021CSE0132": {"name": "John Davis", "specialization": "CSE"},
-        "2021CSBS0133": {"name": "Jane Harris", "specialization": "CSBS"},
-        "2021CSE0134": {"name": "Frank Smith", "specialization": "CSE"},
-        "2021ECE0135": {"name": "Bob Johnson", "specialization": "ECE"},
-        "2021CSBS0136": {"name": "Frank Miller", "specialization": "CSBS"},
-        "2021CSE0137": {"name": "Emma Martinez", "specialization": "CSE"},
-        "2021CSBS0138": {"name": "Bob Jones", "specialization": "CSBS"},
-        "2021CSE0139": {"name": "David Garcia", "specialization": "CSE"},
-        "2021IT0140": {"name": "John Harris", "specialization": "IT"},
-        "2021CSE0141": {"name": "Bob Jones", "specialization": "CSE"},
-        "2021CSE0142": {"name": "Frank Williams", "specialization": "CSE"},
-        "2021CSE0143": {"name": "Alice Martinez", "specialization": "CSE"},
-        "2021CSE0144": {"name": "Charlie Williams", "specialization": "CSE"},
-        "2021CSE0145": {"name": "Emma Garcia", "specialization": "CSE"},
-        "2021CSE0146": {"name": "Emma Garcia", "specialization": "CSE"},
-        "2021CSBS0147": {"name": "Emma Miller", "specialization": "CSBS"},
-        "2021ECE0148": {"name": "Frank Williams", "specialization": "ECE"},
-        "2021CSE0149": {"name": "Charlie Brown", "specialization": "CSE"},
-        "2021CSE0150": {"name": "Jane Johnson", "specialization": "CSE"},
-        "2021CSE0151": {"name": "Emma Harris", "specialization": "CSE"},
-        "2021CSE0152": {"name": "Alice Jones", "specialization": "CSE"},
-        "2021CSE0153": {"name": "Grace Garcia", "specialization": "CSE"},
-        "2021CSE0154": {"name": "Henry Miller", "specialization": "CSE"},
-        "2021CSE0155": {"name": "Bob Jones", "specialization": "CSE"},
-        "2021CSE0156": {"name": "Emma Miller", "specialization": "CSE"},
-        "2021CSE0157": {"name": "Emma Davis", "specialization": "CSE"},
-        "2021ECE0158": {"name": "Henry Martinez", "specialization": "ECE"},
-        "2021CSE0159": {"name": "Emma Davis", "specialization": "CSE"},
-        "2021IT0160": {"name": "David Smith", "specialization": "IT"},
-        "2021IT0161": {"name": "Henry Harris", "specialization": "IT"},
-        "2021CSBS0162": {"name": "David Johnson", "specialization": "CSBS"},
-        "2021ECE0163": {"name": "Henry Smith", "specialization": "ECE"},
-        "2021CSE0164": {"name": "Emma Davis", "specialization": "CSE"},
-        "2021EEE0165": {"name": "Bob Garcia", "specialization": "EEE"},
-        "2021CSE0166": {"name": "Jane Harris", "specialization": "CSE"},
-        "2021CSE0167": {"name": "Charlie Smith", "specialization": "CSE"},
-        "2021ECE0168": {"name": "Jane Martinez", "specialization": "ECE"},
-        "2021ECE0169": {"name": "Jane Brown", "specialization": "ECE"},
-        "2021CSE0170": {"name": "John Harris", "specialization": "CSE"},
-        "2021ECE0171": {"name": "Alice Davis", "specialization": "ECE"},
-        "2021ECE0172": {"name": "Bob Williams", "specialization": "ECE"},
-        "2021EEE0173": {"name": "Grace Miller", "specialization": "EEE"},
-        "2021ECE0174": {"name": "Alice Brown", "specialization": "ECE"},
-        "2021ECE0175": {"name": "David Jones", "specialization": "ECE"},
-        "2021CSE0176": {"name": "Henry Garcia", "specialization": "CSE"},
-        "2021CSE0177": {"name": "Emma Brown", "specialization": "CSE"},
-        "2021EEE0178": {"name": "Emma Harris", "specialization": "EEE"},
-        "2021CSE0179": {"name": "David Miller", "specialization": "CSE"},
-        "2021CSE0180": {"name": "Frank Garcia", "specialization": "CSE"},
-        "2021CSBS0181": {"name": "Bob Davis", "specialization": "CSBS"},
-        "2021ECE0182": {"name": "Charlie Davis", "specialization": "ECE"},
-        "2021ECE0183": {"name": "Emma Miller", "specialization": "ECE"},
-        "2021CSE0184": {"name": "John Jones", "specialization": "CSE"},
-        "2021AI&DS0185": {"name": "John Smith", "specialization": "AI&DS"},
-        "2021CSE0186": {"name": "Henry Davis", "specialization": "CSE"},
-        "2021CSE0187": {"name": "Frank Garcia", "specialization": "CSE"},
-        "2021CSE0188": {"name": "Bob Miller", "specialization": "CSE"},
-        "2021CSE0189": {"name": "John Davis", "specialization": "CSE"},
-        "2021ECE0190": {"name": "Grace Harris", "specialization": "ECE"},
-        "2021ECE0191": {"name": "Henry Harris", "specialization": "ECE"},
-        "2021CSE0192": {"name": "Jane Martinez", "specialization": "CSE"},
-        "2021ECE0193": {"name": "Jane Harris", "specialization": "ECE"},
-        "2021ECE0194": {"name": "David Davis", "specialization": "ECE"},
-        "2021CSE0195": {"name": "Henry Smith", "specialization": "CSE"},
-        "2021CSE0196": {"name": "Frank Davis", "specialization": "CSE"},
-        "2021CSE0197": {"name": "Frank Jones", "specialization": "CSE"},
-        "2021CSE0198": {"name": "Charlie Williams", "specialization": "CSE"},
-        "2021ECE0199": {"name": "Jane Smith", "specialization": "ECE"},
-        "2021CSE0200": {"name": "John Davis", "specialization": "CSE"},
-        "2021CSE0201": {"name": "Grace Harris", "specialization": "CSE"},
-        "2021EEE0202": {"name": "Emma Jones", "specialization": "EEE"},
-        "2021IT0203": {"name": "Charlie Garcia", "specialization": "IT"},
-        "2021CSE0204": {"name": "Bob Jones", "specialization": "CSE"},
-        "2021IT0205": {"name": "David Davis", "specialization": "IT"},
-        "2021CSE0206": {"name": "Grace Smith", "specialization": "CSE"},
-        "2021CSE0207": {"name": "John Jones", "specialization": "CSE"},
-        "2021AI&DS0208": {"name": "Jane Williams", "specialization": "AI&DS"},
-        "2021CSBS0209": {"name": "John Garcia", "specialization": "CSBS"},
-        "2021CSE0210": {"name": "John Williams", "specialization": "CSE"},
-        "2021ECE0211": {"name": "Henry Garcia", "specialization": "ECE"},
-        "2021ECE0212": {"name": "David Brown", "specialization": "ECE"},
-        "2021ECE0213": {"name": "Alice Harris", "specialization": "ECE"},
-        "2021EEE0214": {"name": "David Brown", "specialization": "EEE"},
-        "2021CSBS0215": {"name": "Emma Williams", "specialization": "CSBS"},
-        "2021CSE0216": {"name": "Jane Williams", "specialization": "CSE"},
-        "2021AI&DS0217": {"name": "Jane Garcia", "specialization": "AI&DS"},
-        "2021AI&DS0218": {"name": "Alice Jones", "specialization": "AI&DS"},
-        "2021CSBS0219": {"name": "David Brown", "specialization": "CSBS"},
-        "2021ECE0220": {"name": "Henry Garcia", "specialization": "ECE"}
-    }
+    # Fetch trainers from the database
+    trainers_df = pd.read_sql("SELECT * FROM trainers", conn)
+    trainers = trainers_df["trainer_name"].tolist()
 
-    trainers = [" Abdul ", "Zenob ", "Raj", "Ananth", "Viona", "Rajan ", "Paul ", "Arthi", "Kumar", "Sathish"]
-    
+    if not trainers:
+        st.warning("No trainers available. Please add trainers from the admin panel.")
+        return
 
-    completed_students = [row[0] for row in c.execute("SELECT student_roll_no FROM evaluations").fetchall()]
-    available_students = {k: v for k, v in students.items() if k not in completed_students}
+    # Fetch students who haven't been evaluated
+    c.execute("""
+        SELECT s.student_roll_no, s.student_name, s.specialization 
+        FROM students s 
+        LEFT JOIN evaluations e ON s.student_roll_no = e.student_roll_no
+        WHERE e.student_roll_no IS NULL
+    """)
+    available_students = c.fetchall()
+
+    if not available_students:
+        st.warning("All students have been evaluated. No students left for assessment.")
+        return
+
+    student_dict = {roll: {"name": name, "specialization": spec} for roll, name, spec in available_students}
 
     st.header("Evaluation Form")
     trainer_name = st.selectbox("Trainer Name:", trainers)
-    student_roll_no = st.selectbox("Student Roll No:", list(available_students.keys()))
-    student_name = available_students[student_roll_no]["name"]
+    student_roll_no = st.selectbox("Student Roll No:", list(student_dict.keys()))
+    student_name = student_dict[student_roll_no]["name"]
+    specialization = student_dict[student_roll_no]["specialization"]
+
     st.write(f"**Student Name:** {student_name}")
-    specialization = available_students[student_roll_no]["specialization"]
     st.write(f"**Specialization:** {specialization}")
-    
 
     st.subheader("Evaluation Criteria (Score Range: 1 to 10)")
     col1, col2 = st.columns(2)
 
     with col1:
-        job_knowledge = st.number_input("1. Job Knowledge", min_value=1, max_value=10, value=1, step=1)
-        personality = st.number_input("2. Personality", min_value=1, max_value=10, value=1, step=1)
-        domain_knowledge = st.number_input("3. Domain Knowledge", min_value=1, max_value=10, value=1, step=1)
-        interpersonal_skills = st.number_input("4. Interpersonal Skills", min_value=1, max_value=10, value=1, step=1)
-        attitude = st.number_input("5. Attitude", min_value=1, max_value=10, value=1, step=1)
+        job_knowledge = st.number_input("1. Job Knowledge", min_value=1, max_value=10, step=1)
+        personality = st.number_input("2. Personality", min_value=1, max_value=10, step=1)
+        domain_knowledge = st.number_input("3. Domain Knowledge", min_value=1, max_value=10, step=1)
+        interpersonal_skills = st.number_input("4. Interpersonal Skills", min_value=1, max_value=10, step=1)
+        attitude = st.number_input("5. Attitude", min_value=1, max_value=10, step=1)
 
     with col2:
-        confidence = st.number_input("6. Confidence", min_value=1, max_value=10, value=1, step=1)
-        communication = st.number_input("7. Communication", min_value=1, max_value=10, value=1, step=1)
-        business_acumen = st.number_input("8. Business Acumen", min_value=1, max_value=10, value=1, step=1)
-        analytical_thinking = st.number_input("9. Analytical Thinking", min_value=1, max_value=10, value=1, step=1)
-        leadership = st.number_input("10. Leadership", min_value=1, max_value=10, value=1, step=1)
-
+        confidence = st.number_input("6. Confidence", min_value=1, max_value=10, step=1)
+        communication = st.number_input("7. Communication", min_value=1, max_value=10, step=1)
+        business_acumen = st.number_input("8. Business Acumen", min_value=1, max_value=10, step=1)
+        analytical_thinking = st.number_input("9. Analytical Thinking", min_value=1, max_value=10, step=1)
+        leadership = st.number_input("10. Leadership", min_value=1, max_value=10, step=1)
 
     feedback = st.text_area("Interviewer Feedback / Comments:", height=150)
+    word_count = len(feedback.split())
+    feedback_valid = 100 <= word_count <= 500
 
-    # Enforcing word limit (100 to 500 words)
-    if feedback:
-        word_count = len(feedback.split())
-        if word_count < 100:
-            st.error("Feedback must be at least 100 words.")
-        elif word_count > 500:
-            st.error("Feedback must not exceed 500 words.")
+    if feedback and word_count < 100:
+        st.error("Feedback must be at least 100 words.")
+    elif feedback and word_count > 500:
+        st.error("Feedback must not exceed 500 words.")
 
     agree = st.checkbox("I confirm that the evaluation is accurate and complete.")
-    
-    if st.button("Submit Evaluation", disabled=not agree, use_container_width=True):
-        total_marks = sum([job_knowledge, personality, domain_knowledge, interpersonal_skills, attitude, confidence, communication, business_acumen, analytical_thinking, leadership])
+    submit_disabled = not (feedback_valid and agree)
+
+    if st.button("Submit Evaluation", disabled=submit_disabled, use_container_width=True):
+        total_marks = sum([
+            job_knowledge, personality, domain_knowledge, interpersonal_skills,
+            attitude, confidence, communication, business_acumen, analytical_thinking, leadership
+        ])
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        c.execute("INSERT INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (trainer_name, student_name, student_roll_no, specialization, job_knowledge, personality, domain_knowledge, interpersonal_skills, attitude, confidence, communication, business_acumen, analytical_thinking, leadership, feedback, total_marks, trainer_name, timestamp))
+
+        # Explicitly mention the correct column names
+        c.execute("INSERT INTO evaluations VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", 
+                  (trainer_name, student_name, student_roll_no, specialization, job_knowledge, personality, 
+                   domain_knowledge, interpersonal_skills, attitude, confidence, communication, 
+                   business_acumen, analytical_thinking, leadership, feedback, total_marks, 
+                   trainer_name, timestamp))
         conn.commit()
+
+        # 🎬 Unique Progress Animation
+        with st.spinner("🔄 Evaluating responses..."):
+            for i in range(5):
+                time.sleep(0.3)
+
         st.success("✅ Evaluation submitted successfully!")
 
 if st.session_state.logged_in:
