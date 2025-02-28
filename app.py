@@ -16,10 +16,6 @@ if "logged_in" not in st.session_state:
 conn = sqlite3.connect("evaluations.db", check_same_thread=False)
 c = conn.cursor()
 
-# Drop and recreate the evaluations table to ensure the correct schema
-#c.execute("DROP TABLE IF EXISTS evaluations")
-#conn.commit()
-
 # Create tables if they do not exist
 c.execute('''
     CREATE TABLE IF NOT EXISTS students (
@@ -217,10 +213,13 @@ def admin_dashboard():
         st.session_state.logged_in = False
         st.rerun()
         
-# Trainer Evaluation Form
 def trainer_form():
     st.title("MockTrack: Digital Interview Evaluation System")
     st.write("Streamline Mock Interviews with Seamless Digital Record-Keeping and Evaluation")
+
+    # Initialize session state for form reset
+    if "form_submitted" not in st.session_state:
+        st.session_state.form_submitted = False
 
     # Fetch trainers from the database
     trainers_df = pd.read_sql("SELECT * FROM trainers", conn)
@@ -246,8 +245,15 @@ def trainer_form():
     student_dict = {roll: {"name": name, "specialization": spec} for roll, name, spec in available_students}
 
     st.header("Evaluation Form")
-    trainer_name = st.selectbox("Trainer Name:", trainers)
-    student_roll_no = st.selectbox("Student Roll No:", list(student_dict.keys()))
+
+    # Use session state to store form data
+    if "trainer_name" not in st.session_state:
+        st.session_state.trainer_name = trainers[0] if trainers else ""
+    if "student_roll_no" not in st.session_state:
+        st.session_state.student_roll_no = list(student_dict.keys())[0] if student_dict else ""
+
+    trainer_name = st.selectbox("Trainer Name:", trainers, key="trainer_name")
+    student_roll_no = st.selectbox("Student Roll No:", list(student_dict.keys()), key="student_roll_no")
     student_name = student_dict[student_roll_no]["name"]
     specialization = student_dict[student_roll_no]["specialization"]
 
@@ -258,20 +264,22 @@ def trainer_form():
     col1, col2 = st.columns(2)
 
     with col1:
-        job_knowledge = st.number_input("1. Job Knowledge", min_value=1, max_value=10, step=1)
-        personality = st.number_input("2. Personality", min_value=1, max_value=10, step=1)
-        domain_knowledge = st.number_input("3. Domain Knowledge", min_value=1, max_value=10, step=1)
-        interpersonal_skills = st.number_input("4. Interpersonal Skills", min_value=1, max_value=10, step=1)
-        attitude = st.number_input("5. Attitude", min_value=1, max_value=10, step=1)
+        job_knowledge = st.number_input("1. Job Knowledge", min_value=1, max_value=10, step=1, key="job_knowledge")
+        personality = st.number_input("2. Personality", min_value=1, max_value=10, step=1, key="personality")
+        domain_knowledge = st.number_input("3. Domain Knowledge", min_value=1, max_value=10, step=1, key="domain_knowledge")
+        interpersonal_skills = st.number_input("4. Interpersonal Skills", min_value=1, max_value=10, step=1, key="interpersonal_skills")
+        attitude = st.number_input("5. Attitude", min_value=1, max_value=10, step=1, key="attitude")
 
     with col2:
-        confidence = st.number_input("6. Confidence", min_value=1, max_value=10, step=1)
-        communication = st.number_input("7. Communication", min_value=1, max_value=10, step=1)
-        business_acumen = st.number_input("8. Business Acumen", min_value=1, max_value=10, step=1)
-        analytical_thinking = st.number_input("9. Analytical Thinking", min_value=1, max_value=10, step=1)
-        leadership = st.number_input("10. Leadership", min_value=1, max_value=10, step=1)
+        confidence = st.number_input("6. Confidence", min_value=1, max_value=10, step=1, key="confidence")
+        communication = st.number_input("7. Communication", min_value=1, max_value=10, step=1, key="communication")
+        business_acumen = st.number_input("8. Business Acumen", min_value=1, max_value=10, step=1, key="business_acumen")
+        analytical_thinking = st.number_input("9. Analytical Thinking", min_value=1, max_value=10, step=1, key="analytical_thinking")
+        leadership = st.number_input("10. Leadership", min_value=1, max_value=10, step=1, key="leadership")
 
-    feedback = st.text_area("Interviewer Feedback / Comments:", height=150)
+    # Feedback text area with a unique key
+    feedback_key = f"feedback_{student_roll_no}"  # Unique key for each student
+    feedback = st.text_area("Interviewer Feedback / Comments:", height=150, key=feedback_key)
     word_count = len(feedback.split())
     feedback_valid = 100 <= word_count <= 500
 
@@ -280,7 +288,7 @@ def trainer_form():
     elif feedback and word_count > 500:
         st.error("Feedback must not exceed 500 words.")
 
-    agree = st.checkbox("I confirm that the evaluation is accurate and complete.")
+    agree = st.checkbox("I confirm that the evaluation is accurate and complete.", key="agree")
     submit_disabled = not (feedback_valid and agree)
 
     if st.button("Submit Evaluation", disabled=submit_disabled, use_container_width=True):
@@ -304,6 +312,14 @@ def trainer_form():
                 time.sleep(0.3)
 
         st.success("✅ Evaluation submitted successfully!")
+        
+        st.session_state.form_submitted = True  # Trigger form reset
+
+    # Reset form after submission
+    if st.session_state.form_submitted:
+        time.sleep(3)  # Wait for 3 seconds
+        st.session_state.form_submitted = False  # Reset the flag
+        st.rerun()  # Refresh the app using st.rerun()
 
 if st.session_state.logged_in:
     admin_dashboard()
