@@ -309,7 +309,7 @@ def trainer_form():
         # 🎬 Unique Progress Animation
         with st.spinner("🔄 Evaluating responses..."):
             for i in range(5):
-                time.sleep(0.3)
+                time.sleep(0.1)
 
         st.success("✅ Evaluation submitted successfully!")
         
@@ -317,7 +317,7 @@ def trainer_form():
 
     # Reset form after submission
     if st.session_state.form_submitted:
-        time.sleep(3)  # Wait for 3 seconds
+        time.sleep(1)  # Wait for 3 seconds
         st.session_state.form_submitted = False  # Reset the flag
         st.rerun()  # Refresh the app using st.rerun()
 
